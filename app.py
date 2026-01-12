@@ -6,7 +6,7 @@ import sqlite3
 import plotly.express as px
 
 # --- Configuration & Setup ---
-st.set_page_config(page_title="Poker Host CRM v2.2", page_icon="♠️", layout="wide")
+st.set_page_config(page_title="Poker Host CRM v3.1", page_icon="♠️", layout="wide")
 
 # --- Database Integration ---
 DB_NAME = "poker_crm.db"
@@ -62,11 +62,11 @@ if 'log' not in st.session_state:
     
 # V2.1/V2.2 Accounting State
 if 'expenses_log' not in st.session_state:
-    st.session_state['expenses_log'] = [] # List of {time, item, amount}
+    st.session_state['expenses_log'] = [] 
 if 'rake_log' not in st.session_state:
-    st.session_state['rake_log'] = [] # List of {time, event, amount}
+    st.session_state['rake_log'] = [] 
 if 'insurance_log' not in st.session_state:
-    st.session_state['insurance_log'] = [] # List of {time, outcome, details, amount}
+    st.session_state['insurance_log'] = [] 
 
 if 'income_rake' not in st.session_state:
     st.session_state['income_rake'] = 0.0
@@ -87,7 +87,7 @@ def log_event(event, amount, type_):
         "Type": type_
     })
 
-# --- Translations (V2.2 Updates) ---
+# --- Translations ---
 translations = {
     "English": {
         "nav_header": "Navigation",
@@ -97,9 +97,13 @@ translations = {
         "mode_time": "Time Charge (Venue Fee)",
         "mode_rake": "Rake Game (Profit Share)",
         "sidebar_header": "🔧 Chip Config",
-        "app_title": "🃏 Poker Host CRM v2.2",
+        "app_title": "🃏 Poker Host CRM v3.1",
         "live_header": "🎲 Active Players",
+        "paused_header": "🟡 Paused / Sit Out",
+        "history_header": "⚫ Cashed Out History",
         "rebuy": "Re-buy",
+        "sit_out": "Sit Out", 
+        "return_seat": "Return",
         "cashout": "Cash Out",
         "fee": "Venue Fee",
         "fee_deduct": "Deduct Stack",
@@ -133,7 +137,6 @@ translations = {
         "reset": "Reset All Data",
         "confirm_out": "Confirm & Out",
         "still_owes": "Still Owes",
-        # V2.2 Risk
         "ins_calc": "🧮 Insurance Calculator",
         "ins_bet": "Bet Amount",
         "ins_outs": "Outs (1-20)",
@@ -143,7 +146,11 @@ translations = {
         "btn_loss": "❌ House Loss (Pay Out)",
         "log_rake": "📜 Rake History",
         "log_ins": "📉 Insurance History",
-        "lang_sel": "Language / 語言"
+        "pay_player": "🟢 Pay Player",
+        "player_owes": "🔴 Player Owes",
+        "audit_ok": "✅ System Balanced",
+        "audit_short": "🔴 SHORTAGE DETECTED",
+        "audit_surplus": "🟡 SURPLUS DETECTED"
     },
     "繁體中文": {
         "nav_header": "功能導覽",
@@ -153,9 +160,13 @@ translations = {
         "mode_time": "計時局 (收清潔費)",
         "mode_rake": "抽水局 (股東分潤)",
         "sidebar_header": "🔧 籌碼設定",
-        "app_title": "🃏 撲克局務管理 v2.2",
+        "app_title": "🃏 撲克局務管理 v3.1",
         "live_header": "🎲 在桌玩家",
+        "paused_header": "🟡 暫離 / Sit Out",
+        "history_header": "⚫ 已離桌記錄",
         "rebuy": "加買",
+        "sit_out": "暫離",
+        "return_seat": "回桌",
         "cashout": "結算離桌",
         "fee": "清潔費",
         "fee_deduct": "籌碼扣除",
@@ -189,7 +200,6 @@ translations = {
         "reset": "重置所有資料",
         "confirm_out": "確認結算",
         "still_owes": "尚欠款項",
-        # V2.2 Risk
         "ins_calc": "🧮 保險計算器",
         "ins_bet": "玩家買保險金額",
         "ins_outs": "補牌數 (Outs)",
@@ -199,13 +209,26 @@ translations = {
         "btn_loss": "❌ 中了 (莊賠付錢)",
         "log_rake": "📜 抽水記錄",
         "log_ins": "📉 保險流水",
-        "lang_sel": "Language / 語言"
+        "pay_player": "🟢 應付玩家",
+        "player_owes": "🔴 玩家回補",
+        "audit_ok": "✅ 系統平衡 (無帳差)",
+        "audit_short": "🔴 警告：帳目短缺 (少籌碼)",
+        "audit_surplus": "🟡 警告：帳目盈餘 (多籌碼)"
     }
 }
 
+# --- Chip Config (Helper for Audit) ---
+def get_chip_config():
+    return {
+        "white": st.session_state.get("cfg_white", 5),
+        "red": st.session_state.get("cfg_red", 25),
+        "black": st.session_state.get("cfg_black", 100),
+        "purple": st.session_state.get("cfg_purple", 500),
+        "yellow": st.session_state.get("cfg_yellow", 1000)
+    }
+
 # --- Sidebar ---
 st.sidebar.header("Settings") 
-# We need to render the language selector first to update 't' immediately
 lang = st.sidebar.radio("Language / 語言", ["English", "繁體中文"], horizontal=True, label_visibility="collapsed")
 t = translations[lang]
 
@@ -213,13 +236,49 @@ st.sidebar.divider()
 st.sidebar.header(t["nav_header"])
 page = st.sidebar.radio("Go to", ["Home", "Analytics"], label_visibility="collapsed")
 
+# --- ADMIN MODE (V3.1.2) ---
+if st.sidebar.checkbox("🔧 Admin Mode"):
+    st.sidebar.warning("⚠️ God Mode Active")
+    uploaded_file = st.sidebar.file_uploader("Import CSV", type=["csv"])
+    if uploaded_file is not None:
+        if st.sidebar.button("⚠️ Overwrite Data", type="primary"):
+            try:
+                # 1. Read CSV
+                df_import = pd.read_csv(uploaded_file)
+                
+                # 2. Clear Current State
+                st.session_state['players'] = {}
+                
+                # 3. Repopulate
+                # ExpectedCols: Name, Buy-in, Final Stack, Payout, Fee Paid
+                for index, row in df_import.iterrows():
+                    p_name = str(row['Name'])
+                    p_buyin = float(row['Buy-in']) # Assuming all Cash for simplicity or split if needed
+                    p_stack = float(row['Final Stack'])
+                    p_payout = float(row['Payout'])
+                    p_fee = float(row.get('Fee Paid', 0)) # Safe get
+                    
+                    st.session_state['players'][p_name] = {
+                        "cash_in": p_buyin, 
+                        "credit_in": 0.0, 
+                        "chip_counts": {k:0 for k in get_chip_config()}, 
+                        "status": "out", 
+                        "final_stack": p_stack, 
+                        "final_payout": p_payout, 
+                        "final_fee": p_fee
+                    }
+                st.sidebar.success(f"Imported {len(df_import)} players!")
+                time.sleep(1) # Visual feedback
+                st.rerun()
+            except Exception as e:
+                st.sidebar.error(f"Error: {e}")
+
 # --- PAGE: ANALYTICS ---
 if page == "Analytics":
     st.title(t["analytics_title"])
     df = get_analytics_data()
     
     if not df.empty:
-        # KPIs
         total_profit = df['my_share'].sum()
         total_sessions = len(df)
         avg_profit = df['my_share'].mean()
@@ -229,23 +288,17 @@ if page == "Analytics":
         k2.metric(t["kpi_sessions"], total_sessions)
         k3.metric(t["kpi_avg"], f"${avg_profit:,.0f}")
         
-        # Charts
         st.divider()
         c1, c2 = st.columns([2, 1])
-        
         with c1:
             st.subheader("💰 Growth Curve")
-            # Cumulative Sum
             df['cumulative_profit'] = df['my_share'].cumsum()
             fig = px.line(df, x='timestamp', y='cumulative_profit', markers=True)
             st.plotly_chart(fig, use_container_width=True)
-            
         with c2:
             st.subheader("🎲 Game Modes")
             fig2 = px.pie(df, names='game_mode', values='my_share', hole=0.4)
             st.plotly_chart(fig2, use_container_width=True)
-            
-        # Data Table
         st.dataframe(df.style.format("${:,.0f}", subset=["total_buyin", "net_profit", "my_share"]), use_container_width=True)
     else:
         st.info("No saved sessions yet.")
@@ -254,14 +307,14 @@ if page == "Analytics":
 else:
     # Game Mode Selection
     st.sidebar.header(t["gamemode_header"])
-    # Map selection back to key for consistency
     mode_options = [t["mode_time"], t["mode_rake"]]
     curr_mode = st.session_state.get('game_mode_label', mode_options[0])
-    if curr_mode not in mode_options: curr_mode = mode_options[0] # Fallback if lang changed
+    if curr_mode not in mode_options: curr_mode = mode_options[0]
     
     game_mode_sel = st.sidebar.radio("Mode", mode_options, index=mode_options.index(curr_mode) if curr_mode in mode_options else 0)
     st.session_state['game_mode_label'] = game_mode_sel
-    # Persist the internal key
+    
+    # Internal Mode Key
     if game_mode_sel == t["mode_time"]: st.session_state['game_mode'] = "Time Charge"
     else: st.session_state['game_mode'] = "Rake Game"
     
@@ -273,6 +326,64 @@ else:
         chip_config[k] = st.sidebar.number_input(f"{t[f'chip_{k}']} ({v[0]})", value=v[1], step=5, key=f"cfg_{k}")
         
     st.title(t["app_title"])
+
+    # --- V3.1 INTEGRITY CHECK (AUDIT SYSTEM) ---
+    # Logic: Inflow - Outflow
+    # Inflow = Sum(Cash In + Credit In)
+    # Correct Formula Logic:
+    # Chips Created (Inflow) MUST EQUAL Chips Existing + Chips Destroyed (Outflow)
+    # Outflow = (Active Stacks) + (Paused Stacks) + (Final Stacks of Out Players) + (Money Removed from Table not in Stacks)
+    # Money Removed = (Rake from Pots) + (Insurance Income) + (Expenses/Tips)
+    
+    # Note on Rake: 'income_rake' includes Fees deducted from stacks.
+    # 'Final Stack' ALSO includes Fees (before they were deducted).
+    # To avoid Double Counting, we must use: (Total Rake - Fees Collected).
+    
+    total_inflow = sum(p['cash_in'] + p['credit_in'] for p in st.session_state['players'].values())
+    
+    # 1. Chips currently on table
+    chips_on_table = 0
+    for p in st.session_state['players'].values():
+        if p['status'] in ['active', 'paused']:
+            s = sum(p['chip_counts'][k] * chip_config[k] for k in chip_config)
+            chips_on_table += s
+            
+    # 2. Chips taken by players (Final Stacks)
+    total_final_stacks = sum(p.get('final_stack', 0) for p in st.session_state['players'].values() if p['status'] == 'out')
+    
+    # 3. Fees handling
+    # We need to know how much of 'income_rake' came from Fees vs Pot Rake.
+    total_fees_in_rake = sum(p.get('final_fee', 0) for p in st.session_state['players'].values() if p['status']=='out' and p.get('final_fee', 0) > 0)
+    
+    # 4. Chips removed by House (Pot Rake + Insurance)
+    # We subtract fees from Total Rake because those chips are already counted in 'total_final_stacks'
+    pot_rake = st.session_state['income_rake'] - total_fees_in_rake
+    gross_insurance = st.session_state['income_insurance']
+    
+    # 5. Expenses (Tips) - Excluded from Chip Audit in V3.2
+    # Rationale: Expenses are paid out-of-pocket (cash), not from table chips.
+    # So 'Total Outflow' only tracks where CHIPS went.
+    
+    total_outflow = chips_on_table + total_final_stacks + pot_rake + gross_insurance
+    
+    discrepancy = total_inflow - total_outflow
+    
+    # Audit Bar UI
+    # V3.2: Show detailed breakdown
+    audit_msg = f"Chips In: ${total_inflow:,.0f} | Chips Tracked: ${total_outflow:,.0f} | Diff: ${-discrepancy:,.0f}"
+    
+    if discrepancy == 0:
+        st.success(f"**{t['audit_ok']}**  \n`{audit_msg}`")
+    elif discrepancy > 0:
+        # Shortage (Inflow > Outflow) - Missing chips
+        st.error(f"**{t['audit_short']}: -${discrepancy:,.0f}**  \n`{audit_msg}`")
+    else:
+        # Surplus (Outflow > Inflow) - Extra chips
+        st.warning(f"**{t['audit_surplus']}: +${abs(discrepancy):,.0f}**  \n`{audit_msg}`")
+        
+    st.divider()
+
+    # --- APP BODY ---
     
     # 1. Add Player
     with st.expander("👤 Add Player", expanded=False):
@@ -285,26 +396,35 @@ else:
                 st.session_state['players'][new_name] = {
                     "cash_in": new_cash, "credit_in": new_credit, 
                     "chip_counts": {k:0 for k in chip_config}, 
-                    "status": "active", "final_stack": 0, "final_payout": 0
+                    "status": "active", "final_stack": 0, "final_payout": 0, "final_fee": 0
                 }
                 st.rerun()
 
     # 2. Active Players
     st.subheader(t["live_header"])
     active = {n:p for n,p in st.session_state['players'].items() if p['status']=='active'}
+    paused = {n:p for n,p in st.session_state['players'].items() if p['status']=='paused'}
     
+    if not active:
+        st.info("No active players.")
+
     for name, data in active.items():
-        with st.expander(f"**{name}** (${data['cash_in']+data['credit_in']:,})"):
+        with st.expander(f"**{name}** (${data['cash_in']+data['credit_in']:,}) -- Active", expanded=True):
             c_chips, c_acts = st.columns([3, 1])
             
-            # Re-buy
-            with c_acts.popover(t["rebuy"]):
-                amt = st.number_input("Amt", step=100, key=f"rb_{name}")
-                if st.button("Confirm", key=f"btn_rb_{name}"):
-                    data['cash_in'] += amt
-                    log_event(f"{name} Rebuy", amt, "Cash")
+            with c_acts:
+                # Re-buy
+                with st.popover(t["rebuy"]):
+                    amt = st.number_input("Amt", step=100, key=f"rb_{name}")
+                    if st.button("Confirm", key=f"btn_rb_{name}"):
+                        data['cash_in'] += amt
+                        log_event(f"{name} Rebuy", amt, "Cash")
+                        st.rerun()
+                # Sit Out
+                if st.button(t["sit_out"], key=f"so_{name}"):
+                    data['status'] = 'paused'
                     st.rerun()
-            
+
             # Chips
             stack = 0
             cols = c_chips.columns(5)
@@ -320,37 +440,62 @@ else:
             
             # Venue Fee Logic
             fee = 0
+            fee_method = "N/A"
             if st.session_state['game_mode'] == "Time Charge":
                 fee = co1.number_input(t["fee"], value=170, step=10, key=f"fee_{name}")
                 fee_method = co2.radio("Method", [t["fee_deduct"], t["fee_cash"]], key=f"fm_{name}")
-            else:
-                fee_method = "N/A"
             
-            if co3.button(t["cashout"], key=f"btn_co_{name}"):
-                payout_stack = stack
-                if st.session_state['game_mode'] == "Time Charge":
-                    if fee_method == t["fee_deduct"]:
-                        payout_stack = max(0, stack - fee)
-                        st.session_state['income_rake'] += fee 
-                        st.session_state['rake_log'].append({"Time": datetime.now().strftime("%H:%M"), "Event": f"{name} Fee", "Amount": fee})
-                        log_event(f"{name} Fee (Deduct)", fee, "Fee")
-                    else:
-                        st.session_state['income_rake'] += fee
-                        st.session_state['fee_cash_collected'] += fee
-                        st.session_state['rake_log'].append({"Time": datetime.now().strftime("%H:%M"), "Event": f"{name} Fee (Cash)", "Amount": fee})
-                        log_event(f"{name} Fee (Cash)", fee, "Fee")
+            # --- REAL TIME NET CALCULATION ---
+            if st.session_state['game_mode'] == "Time Charge" and fee_method == t["fee_deduct"]:
+                proj_payout_stack = max(0, stack - fee)
+            else:
+                proj_payout_stack = stack
+            
+            credit_debt = data['credit_in']
+            debt_cleared = min(proj_payout_stack, credit_debt)
+            proj_cash_payout = proj_payout_stack - debt_cleared
+            proj_remaining_debt = credit_debt - debt_cleared
+            
+            with co3:
+                # Visual Alerts
+                if proj_remaining_debt > 0:
+                    st.error(f"{t['player_owes']}: ${proj_remaining_debt:,.0f}")
+                else:
+                    st.success(f"{t['pay_player']}: ${proj_cash_payout:,.0f}")
                 
-                # Debt logic
-                debt_cleared = min(payout_stack, data['credit_in'])
-                cash_payout = payout_stack - debt_cleared
-                
-                # Update
-                data['final_stack'] = stack
-                data['final_payout'] = cash_payout
-                data['status'] = 'out'
-                st.rerun()
+                if st.button(t["cashout"], key=f"btn_co_{name}", type="primary"):
+                    payout_stack = proj_payout_stack
+                    
+                    # Record Fee
+                    if st.session_state['game_mode'] == "Time Charge":
+                        if fee_method == t["fee_deduct"]:
+                             st.session_state['income_rake'] += fee 
+                             st.session_state['rake_log'].append({"Time": datetime.now().strftime("%H:%M"), "Event": f"{name} Fee", "Amount": fee})
+                             log_event(f"{name} Fee", fee, "Fee")
+                        else:
+                             st.session_state['income_rake'] += fee
+                             st.session_state['fee_cash_collected'] += fee
+                             st.session_state['rake_log'].append({"Time": datetime.now().strftime("%H:%M"), "Event": f"{name} Fee (Cash)", "Amount": fee})
+                             log_event(f"{name} Fee (Cash)", fee, "Fee")
+                    
+                    data['final_stack'] = stack
+                    data['final_payout'] = proj_cash_payout
+                    data['final_fee'] = fee
+                    data['status'] = 'out'
+                    st.rerun()
 
-    # 3. Summary & Financials (V2.2)
+    # Paused Players
+    if paused:
+        st.markdown("---")
+        with st.expander(t["paused_header"], expanded=True):
+            for name, data in paused.items():
+                pc1, pc2 = st.columns([4, 1])
+                pc1.info(f"**{name}** (Buy-in: ${data['cash_in']+data['credit_in']:,}) - Paused")
+                if pc2.button(t["return_seat"], key=f"ret_{name}"):
+                    data['status'] = 'active'
+                    st.rerun()
+
+    # 3. Summary & Financials
     st.markdown("---")
     st.header(t["summary"])
     
@@ -370,135 +515,118 @@ else:
                      "Amount": exp_amt
                  })
                  st.rerun()
-        
         if st.session_state['expenses_log']:
             st.dataframe(pd.DataFrame(st.session_state['expenses_log']), use_container_width=True)
             
     # --- INCOME & RISK ---
     with tab_inc:
-        ic1, ic2 = st.columns([1, 1.2]) # Bigger column for calc
+        show_rake = (st.session_state['game_mode'] == "Rake Game")
         
-        # --- LEFT: RAKE ---
-        with ic1:
-            st.subheader(t["lbl_rake"])
-            new_rake = st.number_input("+ $", step=100.0, key="new_rake_in")
-            if st.button(t["btn_add_rake"]):
-                if new_rake > 0:
-                    st.session_state['income_rake'] += new_rake
-                    st.session_state['rake_log'].append({
-                        "Time": datetime.now().strftime("%H:%M"), 
-                        "Event": "Manual Rake", 
-                        "Amount": new_rake
-                    })
-                    st.rerun()
-            
-            st.metric(t["total_rake"], f"${st.session_state['income_rake']:,.0f}")
-            
-            st.caption(t["log_rake"])
-            if st.session_state['rake_log']:
-                 st.dataframe(pd.DataFrame(st.session_state['rake_log'][::-1]), use_container_width=True, height=200)
+        if show_rake:
+            ic1, ic2 = st.columns([1, 1.2])
+        else:
+            ic2 = st.container()
+            ic1 = None
 
-        # --- RIGHT: INSURANCE ---
+        # --- RAKE (Conditional) ---
+        if show_rake and ic1:
+            with ic1:
+                st.subheader(t["lbl_rake"])
+                new_rake = st.number_input("+ $", step=100.0, key="new_rake_in")
+                if st.button(t["btn_add_rake"]):
+                    if new_rake > 0:
+                        st.session_state['income_rake'] += new_rake
+                        st.session_state['rake_log'].append({
+                            "Time": datetime.now().strftime("%H:%M"), 
+                            "Event": "Manual Rake", 
+                            "Amount": new_rake
+                        })
+                        st.rerun()
+                st.metric(t["total_rake"], f"${st.session_state['income_rake']:,.0f}")
+                st.caption(t["log_rake"])
+                if st.session_state['rake_log']:
+                     st.dataframe(pd.DataFrame(st.session_state['rake_log'][::-1]), use_container_width=True, height=200)
+
+        # --- INSURANCE ---
         with ic2:
             st.subheader(t["lbl_ins"])
-            
-            # Risk Calculator
             with st.expander(t["ins_calc"], expanded=True):
                 ins_bet = st.number_input(t["ins_bet"], min_value=0.0, step=100.0, key="ins_bet_val")
-                # Outs slider 1-20
                 ins_outs = st.slider(t["ins_outs"], 1, 20, 4)
-                
-                # Standard Odds Dict
                 odds_map = {1:30, 2:16, 3:10, 4:8, 5:6, 6:5, 7:4.5, 8:4, 9:3.5, 10:3, 11:2.6, 12:2.3, 13:2, 14:1.8, 15:1.6, 16:1.4}
                 curr_odd = odds_map.get(ins_outs, 1.2)
-                
                 payout = ins_bet * curr_odd
-                
                 c_cal1, c_cal2 = st.columns(2)
                 c_cal1.metric(t["ins_odds"], f"1:{curr_odd}")
                 c_cal2.metric(t["ins_payout"], f"${payout:,.0f}")
-                
                 b_win, b_loss = st.columns(2)
                 if b_win.button(t["btn_win"], use_container_width=True):
                     if ins_bet > 0:
                         st.session_state['income_insurance'] += ins_bet
                         st.session_state['insurance_log'].append({
-                            "Time": datetime.now().strftime("%H:%M"),
-                            "Action": "Win (沒中)",
-                            "Details": f"Bet ${ins_bet} on {ins_outs} Outs",
-                            "Change": f"+${ins_bet}"
+                            "Time": datetime.now().strftime("%H:%M"), "Action": "Win (沒中)", "Details": f"Bet ${ins_bet}", "Change": f"+${ins_bet}"
                         })
                         st.rerun()
-                
                 if b_loss.button(t["btn_loss"], use_container_width=True):
                     if ins_bet > 0:
                         st.session_state['income_insurance'] -= payout
                         st.session_state['insurance_log'].append({
-                            "Time": datetime.now().strftime("%H:%M"),
-                            "Action": "Loss (中了)",
-                            "Details": f"Pay limit 1:{curr_odd}",
-                            "Change": f"-${payout}"
+                            "Time": datetime.now().strftime("%H:%M"), "Action": "Loss (中了)", "Details": f"Pay limit", "Change": f"-${payout}"
                         })
                         st.rerun()
 
-            # Manual Add Override
             with st.popover(t["btn_add_ins"]):
                 manual_ins = st.number_input("Manual Amount (+)", step=100.0)
                 if st.button("Add Manual"):
                     st.session_state['income_insurance'] += manual_ins
                     st.session_state['insurance_log'].append({"Time": datetime.now().strftime("%H:%M"), "Action": "Manual", "Details": "-", "Change": f"+${manual_ins}"})
                     st.rerun()
-
             st.metric(t["total_ins"], f"${st.session_state['income_insurance']:,.0f}")
-            
             st.caption(t["log_ins"])
             if st.session_state['insurance_log']:
                 st.dataframe(pd.DataFrame(st.session_state['insurance_log'][::-1]), use_container_width=True, height=200)
 
-
-    # --- FINAL CALCULATIONS ---
+    # Breakdown
     st.divider()
-    
     total_rake = st.session_state['income_rake']
     total_ins = st.session_state['income_insurance']
     total_exp = sum(x['Amount'] for x in st.session_state['expenses_log'])
-    
     gross_income = total_rake + total_ins
     net_profit = gross_income - total_exp
     
-    # Display Breakdown
     b1, b2, b3, b4 = st.columns(4)
     b1.metric(t["gross_income"], f"${gross_income:,.0f}")
     b2.metric(t["total_exp"], f"${total_exp:,.0f}")
     b3.metric(t["net_profit"], f"${net_profit:,.0f}", delta_color="normal" if net_profit >= 0 else "inverse")
     
-    # Profit Sharing
     host_pct = 100
     if st.session_state['game_mode'] == "Rake Game":
         host_pct = st.slider(t["pct_share"], 0, 100, 60)
-        
     my_share = net_profit * (host_pct / 100.0)
     partner_share = net_profit - my_share
-    
     b4.metric(t["my_share"], f"${my_share:,.0f}")
-    if partner_share != 0:
-        st.info(f"{t['partner_share']}: ${partner_share:,.0f}")
 
     # SAVE SESSION
     notes = st.text_input(t["notes"])
     if st.button(t["save_session"], type="primary"):
-        # Append expense details to notes for record keeping
         exp_details = "; ".join([f"{x['Item']}:${x['Amount']}" for x in st.session_state['expenses_log']])
         final_notes = f"{notes} | Exp: {exp_details}"
-        
         total_buyin = sum(p['cash_in']+p['credit_in'] for p in st.session_state['players'].values())
         total_payout = sum(p['final_payout'] for p in st.session_state['players'].values() if p['status']=='out')
-        
         save_session_to_db(st.session_state['game_mode'], total_buyin, total_payout, gross_income, total_exp, net_profit, my_share, final_notes)
         st.success(t["saved"])
         st.balloons()
         
-    # Reset
+    # --- Cashed Out History ---
+    out_players = [
+        {"Name": n, "Buy-in": p['cash_in']+p['credit_in'], "Final Stack": p['final_stack'], "Payout": p['final_payout'], "Fee Paid": p.get('final_fee', 0)}
+        for n, p in st.session_state['players'].items() if p['status'] == 'out'
+    ]
+    if out_players:
+        st.markdown("---")
+        st.subheader(t["history_header"])
+        st.dataframe(pd.DataFrame(out_players), use_container_width=True)
+
     if st.button(t["reset"]):
         st.session_state.clear()
         st.rerun()
