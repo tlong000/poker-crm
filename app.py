@@ -18,7 +18,7 @@ except Exception as e:
     st.stop()
 
 # Cookie Manager for Auto-Login
-@st.cache_resource(experimental_allow_widgets=True)
+@st.cache_resource
 def get_manager():
     return stx.CookieManager()
 
