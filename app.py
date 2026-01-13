@@ -6,25 +6,60 @@ import plotly.express as px
 from streamlit_gsheets import GSheetsConnection
 
 # --- Configuration & Setup ---
-st.set_page_config(page_title="Poker Host CRM v4.0", page_icon="♠️", layout="wide")
+st.set_page_config(page_title="Poker Host CRM v5.0 SaaS", page_icon="♠️", layout="wide")
+
+# --- V5.0 SaaS AUTHENTICATION ---
+try:
+    HOSTS = st.secrets["hosts"]
+except Exception as e:
+    st.error("Missing `.streamlit/secrets.toml` with [hosts] section.")
+    st.stop()
+
+if 'authenticated' not in st.session_state:
+    st.session_state['authenticated'] = False
+
+if not st.session_state['authenticated']:
+    c1, c2, c3 = st.columns([1,2,1])
+    with c2:
+        st.title("🔒 Poker CRM Partner Portal")
+        st.info("Please log in to access your dashboard.")
+        
+        uid = st.text_input("Host ID")
+        upw = st.text_input("Password", type="password")
+        
+        if st.button("Log In", type="primary", use_container_width=True):
+            if uid in HOSTS and HOSTS[uid] == upw:
+                st.session_state['authenticated'] = True
+                st.session_state['host_id'] = uid
+                st.toast(f"Welcome back, {uid}!", icon="👋")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+    st.stop() # Prevent Main App from loading
 
 # --- Google Sheets Connection ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def get_analytics_data():
     try:
-        df = conn.read(ttl="10s") # 每10秒刷新一次數據
+        df = conn.read(ttl="10s")
+        # V5.0 Data Isolation
+        current_host = st.session_state.get('host_id')
+        if not df.empty and 'Host_ID' in df.columns:
+            df = df[df['Host_ID'] == current_host]
         return df
     except Exception as e:
         return pd.DataFrame()
 
 def save_session_to_cloud(mode, buyin, cashout, gross, expenses, net, share, notes):
     # 1. 讀取現有數據
-    existing_data = get_analytics_data()
+    existing_data = conn.read(ttl="10s") # Read raw to append safely
     
     # 2. 準備新行
     new_row = pd.DataFrame([{
         "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Host_ID": st.session_state.get('host_id', 'unknown'),
         "Mode": mode,
         "Total_Buyin": buyin,
         "Total_Cashout": cashout,
@@ -36,9 +71,13 @@ def save_session_to_cloud(mode, buyin, cashout, gross, expenses, net, share, not
     }])
     
     # 3. 合併並更新
-    updated_df = pd.concat([existing_data, new_row], ignore_index=True)
+    if existing_data.empty:
+        updated_df = new_row
+    else:
+        updated_df = pd.concat([existing_data, new_row], ignore_index=True)
+        
     conn.update(data=updated_df)
-    st.cache_data.clear() # 清除緩存以確保下次讀取最新數據
+    st.cache_data.clear()
 
 # --- Session State ---
 if 'players' not in st.session_state:
@@ -221,6 +260,11 @@ def get_chip_config():
 
 # --- Sidebar ---
 st.sidebar.header("Settings") 
+st.sidebar.caption(f"Logged in as: `{st.session_state['host_id']}`")
+if st.sidebar.button("Logout", type="primary"):
+    st.session_state['authenticated'] = False
+    st.rerun()
+
 lang = st.sidebar.radio("Language / 語言", ["English", "繁體中文"], horizontal=True, label_visibility="collapsed")
 t = translations[lang]
 
