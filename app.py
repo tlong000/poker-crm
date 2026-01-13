@@ -14,7 +14,7 @@ st.set_page_config(page_title="Poker Host CRM v5.5", page_icon="♠️", layout=
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # --- 1. Initialize Cookie Manager ---
-cookie_manager = stx.CookieManager(key="cookie_manager")
+cookie_manager = stx.CookieManager(key="cookie_manager_main")
 
 if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
@@ -154,11 +154,6 @@ except Exception as e:
     st.error("Missing `.streamlit/secrets.toml` with [hosts] section.")
     st.stop()
 
-# --- 1. Initialize Cookie Manager ---
-cookie_manager = stx.CookieManager(key="cookie_manager")
-
-if 'authenticated' not in st.session_state:
-    st.session_state['authenticated'] = False
 
 # --- 3. Auto-Login Logic ---
 cookie_token = cookie_manager.get("host_token")
