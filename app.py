@@ -198,6 +198,12 @@ if st.session_state['authenticated']:
         # D. Rerun to show login page
         st.rerun()
 
+    # Manual Force Save (V6.1)
+    if st.sidebar.button("💾 Force Flight Recorder"):
+        sync_state_to_cloud()
+        st.toast("State Saved Manually")
+
+
 # --- 6. Manual Login Page ---
 if not st.session_state['authenticated']:
     c1, c2, c3 = st.columns([1,2,1])
@@ -406,14 +412,9 @@ def get_chip_config():
         "yellow": st.session_state.get("cfg_yellow", 1000)
     }
 
-# --- Sidebar ---
+# --- Sidebar Options ---
 st.sidebar.header("Settings") 
 
-
-    # Manual Force Save
-    if st.sidebar.button("💾 Force Flight Recorder"):
-        sync_state_to_cloud()
-        st.toast("State Saved Manually")
 
 lang = st.sidebar.radio("Language / 語言", ["English", "繁體中文"], horizontal=True, label_visibility="collapsed")
 t = translations[lang]
