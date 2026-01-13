@@ -18,7 +18,7 @@ except Exception as e:
     st.stop()
 
 # Cookie Manager for Auto-Login
-@st.cache_resource
+# @st.cache_resource (Removed to fix CachedWidgetWarning)
 def get_manager():
     return stx.CookieManager()
 
