@@ -3,12 +3,142 @@ import pandas as pd
 import time
 from datetime import datetime
 import plotly.express as px
+import json
 from streamlit_gsheets import GSheetsConnection
-
 import extra_streamlit_components as stx
 
 # --- Configuration & Setup ---
-st.set_page_config(page_title="Poker Host CRM v5.2", page_icon="♠️", layout="wide")
+st.set_page_config(page_title="Poker Host CRM v5.5", page_icon="♠️", layout="wide")
+
+# --- Google Sheets Connection ---
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+# --- FLIGHT RECORDER FUNCTIONS (Persistence) ---
+def save_snapshot():
+    """Saves current session state to 'state' worksheet"""
+    if not st.session_state.get('authenticated'): return
+
+    # 1. Gather State
+    state_payload = {
+        "players": st.session_state.get('players', {}),
+        "log": st.session_state.get('log', []),
+        "expenses": st.session_state.get('expenses_log', []),
+        "rake_log": st.session_state.get('rake_log', []),
+        "insurance_log": st.session_state.get('insurance_log', []),
+        "income_rake": st.session_state.get('income_rake', 0.0),
+        "income_insurance": st.session_state.get('income_insurance', 0.0),
+        "game_mode": st.session_state.get('game_mode', "Time Charge"),
+        "start_time": st.session_state.get('start_time', time.time()),
+        "fee_cash_collected": st.session_state.get('fee_cash_collected', 0.0)
+    }
+    
+    json_str = json.dumps(state_payload)
+    host_id = st.session_state.get('host_id')
+    if not host_id: return
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    try:
+        # 2. Read Existing
+        try:
+            df_state = conn.read(worksheet="state", ttl=0)
+        except:
+            df_state = pd.DataFrame(columns=["Host_ID", "Updated", "State_JSON"])
+            
+        # 3. Upsert
+        new_row = {"Host_ID": host_id, "Updated": now_str, "State_JSON": json_str}
+        
+        if not df_state.empty and "Host_ID" in df_state.columns:
+            if host_id in df_state["Host_ID"].values:
+                df_state.loc[df_state["Host_ID"] == host_id, ["Updated", "State_JSON"]] = [now_str, json_str]
+            else:
+                df_state = pd.concat([df_state, pd.DataFrame([new_row])], ignore_index=True)
+        else:
+            df_state = pd.DataFrame([new_row])
+            
+        # 4. Push (Upsert logic simulation via full update)
+        conn.update(worksheet="state", data=df_state)
+    except Exception as e:
+        print(f"Snapshot failed: {e}")
+
+def restore_snapshot():
+    """Restores session state from 'state' worksheet if exists"""
+    try:
+        host_id = st.session_state.get('host_id')
+        if not host_id: return False
+
+        try:
+            df_state = conn.read(worksheet="state", ttl=0)
+        except:
+            return False # Sheet doesn't exist
+        
+        if not df_state.empty and "Host_ID" in df_state.columns:
+            row = df_state[df_state["Host_ID"] == host_id]
+            if not row.empty:
+                json_str = row.iloc[0]["State_JSON"]
+                if not json_str: return False
+
+                payload = json.loads(json_str)
+                
+                # Restore keys
+                st.session_state['players'] = payload.get('players', {})
+                st.session_state['log'] = payload.get('log', [])
+                st.session_state['expenses_log'] = payload.get('expenses', [])
+                st.session_state['rake_log'] = payload.get('rake_log', [])
+                st.session_state['insurance_log'] = payload.get('insurance_log', [])
+                st.session_state['income_rake'] = payload.get('income_rake', 0.0)
+                st.session_state['income_insurance'] = payload.get('income_insurance', 0.0)
+                st.session_state['game_mode'] = payload.get('game_mode', "Time Charge")
+                st.session_state['start_time'] = payload.get('start_time', time.time())
+                st.session_state['fee_cash_collected'] = payload.get('fee_cash_collected', 0.0)
+                
+                return True
+    except Exception as e:
+        pass
+    return False
+
+def wipe_snapshot():
+    """Clears persistence for current host"""
+    try:
+        host_id = st.session_state.get('host_id')
+        df_state = conn.read(worksheet="state", ttl=0)
+        if not df_state.empty and "Host_ID" in df_state.columns:
+            # Drop row
+            df_state = df_state[df_state["Host_ID"] != host_id]
+            conn.update(worksheet="state", data=df_state)
+    except:
+        pass
+
+def get_analytics_data():
+    try:
+        df = conn.read(ttl="10s")
+        current_host = st.session_state.get('host_id')
+        if not df.empty and 'Host_ID' in df.columns:
+            df = df[df['Host_ID'] == current_host]
+        return df
+    except:
+        return pd.DataFrame()
+
+def save_session_to_cloud(mode, buyin, cashout, gross, expenses, net, share, notes):
+    existing_data = conn.read(ttl="10s")
+    new_row = pd.DataFrame([{
+        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Host_ID": st.session_state.get('host_id', 'unknown'),
+        "Mode": mode,
+        "Total_Buyin": buyin,
+        "Total_Cashout": cashout,
+        "Gross_Profit": gross,
+        "Expenses": expenses,
+        "Net_Profit": net,
+        "My_Share": share,
+        "Notes": notes
+    }])
+    if existing_data.empty:
+        updated_df = new_row
+    else:
+        updated_df = pd.concat([existing_data, new_row], ignore_index=True)
+    conn.update(data=updated_df)
+    st.cache_data.clear()
 
 # --- V5.0 SaaS AUTHENTICATION ---
 try:
@@ -17,25 +147,29 @@ except Exception as e:
     st.error("Missing `.streamlit/secrets.toml` with [hosts] section.")
     st.stop()
 
-# Cookie Manager for Auto-Login
+# Cookie Manager
 # @st.cache_resource (Removed to fix CachedWidgetWarning)
 def get_manager():
     return stx.CookieManager()
 
 cookie_manager = get_manager()
 
-# Check for exisiting session or cookie
 if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
 
-# Auto-Login Logic
+# Auto-Login Check
 if not st.session_state['authenticated']:
+    # Avoid reading cookie on every script run if already processing login? 
+    # Actually component handles this internally
     auth_token = cookie_manager.get(cookie="poker_crm_token")
     if auth_token and auth_token in HOSTS:
         st.session_state['authenticated'] = True
         st.session_state['host_id'] = auth_token
-        st.toast(f"Welcome back, {auth_token}!", icon="🍪")
-        
+        if restore_snapshot():
+            st.toast(f"Welcome back, {auth_token}! Session restored.", icon="🔄")
+        else:
+            st.toast(f"Welcome back, {auth_token}!", icon="👋")
+
 if not st.session_state['authenticated']:
     c1, c2, c3 = st.columns([1,2,1])
     with c2:
@@ -54,79 +188,33 @@ if not st.session_state['authenticated']:
                 if remember:
                     cookie_manager.set("poker_crm_token", uid, expires_at=datetime.now() + pd.Timedelta(days=30))
                 
-                st.toast(f"Welcome back, {uid}!", icon="👋")
+                if restore_snapshot():
+                     st.toast("Session Restored!", icon="🔄")
+                
                 time.sleep(1)
                 st.rerun()
             else:
                 st.error("Invalid credentials")
-    st.stop() # Prevent Main App from loading
+    st.stop() 
 
-# --- Google Sheets Connection ---
-conn = st.connection("gsheets", type=GSheetsConnection)
+# --- SESSION STATE DEFAULTS ---
+# Initialize defaults only if keys don't exist (i.e. not restored)
+defaults = {
+    'players': {},
+    'start_time': time.time(),
+    'log': [],
+    'expenses_log': [],
+    'rake_log': [],
+    'insurance_log': [],
+    'income_rake': 0.0,
+    'income_insurance': 0.0,
+    'fee_cash_collected': 0.0,
+    'game_mode': "Time Charge (Venue Fee)"
+}
 
-def get_analytics_data():
-    try:
-        df = conn.read(ttl="10s")
-        # V5.0 Data Isolation
-        current_host = st.session_state.get('host_id')
-        if not df.empty and 'Host_ID' in df.columns:
-            df = df[df['Host_ID'] == current_host]
-        return df
-    except Exception as e:
-        return pd.DataFrame()
-
-def save_session_to_cloud(mode, buyin, cashout, gross, expenses, net, share, notes):
-    # 1. 讀取現有數據
-    existing_data = conn.read(ttl="10s") # Read raw to append safely
-    
-    # 2. 準備新行
-    new_row = pd.DataFrame([{
-        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Host_ID": st.session_state.get('host_id', 'unknown'),
-        "Mode": mode,
-        "Total_Buyin": buyin,
-        "Total_Cashout": cashout,
-        "Gross_Profit": gross,
-        "Expenses": expenses,
-        "Net_Profit": net,
-        "My_Share": share,
-        "Notes": notes
-    }])
-    
-    # 3. 合併並更新
-    if existing_data.empty:
-        updated_df = new_row
-    else:
-        updated_df = pd.concat([existing_data, new_row], ignore_index=True)
-        
-    conn.update(data=updated_df)
-    st.cache_data.clear()
-
-# --- Session State ---
-if 'players' not in st.session_state:
-    st.session_state['players'] = {}
-if 'start_time' not in st.session_state:
-    st.session_state['start_time'] = time.time()
-if 'log' not in st.session_state:
-    st.session_state['log'] = []
-    
-# V2.1/V2.2 Accounting State
-if 'expenses_log' not in st.session_state:
-    st.session_state['expenses_log'] = [] 
-if 'rake_log' not in st.session_state:
-    st.session_state['rake_log'] = [] 
-if 'insurance_log' not in st.session_state:
-    st.session_state['insurance_log'] = [] 
-
-if 'income_rake' not in st.session_state:
-    st.session_state['income_rake'] = 0.0
-if 'income_insurance' not in st.session_state:
-    st.session_state['income_insurance'] = 0.0
-    
-if 'fee_cash_collected' not in st.session_state:
-    st.session_state['fee_cash_collected'] = 0.0
-if 'game_mode' not in st.session_state:
-    st.session_state['game_mode'] = "Time Charge (Venue Fee)"
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 # Helper
 def log_event(event, amount, type_):
@@ -136,6 +224,7 @@ def log_event(event, amount, type_):
         "Amount": f"${amount:,.0f}",
         "Type": type_
     })
+    save_snapshot() # Auto-Save on Log
 
 # --- Translations ---
 translations = {
@@ -147,7 +236,7 @@ translations = {
         "mode_time": "Time Charge (Venue Fee)",
         "mode_rake": "Rake Game (Profit Share)",
         "sidebar_header": "🔧 Chip Config",
-        "app_title": "🃏 Poker Host CRM v4.0",
+        "app_title": "🃏 Poker Host CRM v5.5",
         "live_header": "🎲 Active Players",
         "paused_header": "🟡 Paused / Sit Out",
         "history_header": "⚫ Cashed Out History",
@@ -212,7 +301,7 @@ translations = {
         "mode_time": "計時局 (收清潔費)",
         "mode_rake": "抽水局 (股東分潤)",
         "sidebar_header": "🔧 籌碼設定",
-        "app_title": "🃏 撲克局務管理 v4.0",
+        "app_title": "🃏 撲克局務管理 v5.5",
         "live_header": "🎲 在桌玩家",
         "paused_header": "🟡 暫離 / Sit Out",
         "history_header": "⚫ 已離桌記錄",
@@ -283,11 +372,17 @@ def get_chip_config():
 
 # --- Sidebar ---
 st.sidebar.header("Settings") 
-st.sidebar.caption(f"Logged in as: `{st.session_state['host_id']}`")
-if st.sidebar.button("Logout", type="primary"):
-    st.session_state['authenticated'] = False
-    cookie_manager.delete("poker_crm_token")
-    st.rerun()
+if st.session_state.get('authenticated'):
+    st.sidebar.caption(f"Logged in as: `{st.session_state['host_id']}`")
+    if st.sidebar.button("Logout", type="primary"):
+        st.session_state['authenticated'] = False
+        cookie_manager.delete("poker_crm_token")
+        st.rerun()
+
+    # Manual Force Save
+    if st.sidebar.button("💾 Force Flight Recorder"):
+        save_snapshot()
+        st.toast("State Saved Manually")
 
 lang = st.sidebar.radio("Language / 語言", ["English", "繁體中文"], horizontal=True, label_visibility="collapsed")
 t = translations[lang]
@@ -327,6 +422,7 @@ if st.sidebar.checkbox("🔧 Admin Mode"):
                         "final_payout": p_payout, 
                         "final_fee": p_fee
                     }
+                save_snapshot() # Auto-Save on Import
                 st.sidebar.success(f"Imported {len(df_import)} players!")
                 time.sleep(1) 
                 st.rerun()
@@ -375,8 +471,10 @@ else:
     st.session_state['game_mode_label'] = game_mode_sel
     
     # Internal Mode Key
-    if game_mode_sel == t["mode_time"]: st.session_state['game_mode'] = "Time Charge"
-    else: st.session_state['game_mode'] = "Rake Game"
+    new_mode = "Time Charge" if game_mode_sel == t["mode_time"] else "Rake Game"
+    if st.session_state['game_mode'] != new_mode:
+        st.session_state['game_mode'] = new_mode
+        save_snapshot() # Save on mode change
     
     # Chip Config
     st.sidebar.header(t["sidebar_header"])
@@ -440,6 +538,7 @@ else:
                     "chip_counts": {k:0 for k in chip_config}, 
                     "status": "active", "final_stack": 0, "final_payout": 0, "final_fee": 0
                 }
+                save_snapshot()
                 st.rerun()
 
     # 2. Active Players
@@ -462,6 +561,7 @@ else:
                     if st.button("Confirm", key=f"btn_rb_{name}"):
                         data['cash_in'] += amt 
                         log_event(f"{name} Rebuy", amt, "Cash")
+                        # save_snapshot called in log_event
                         st.rerun()
                 
                 # Repay (V3.2)
@@ -480,15 +580,29 @@ else:
                 # Sit Out
                 if st.button(t["sit_out"], key=f"so_{name}"):
                     data['status'] = 'paused'
+                    save_snapshot()
                     st.rerun()
 
             # Chips
             stack = 0
             cols = c_chips.columns(5)
+            changed_chips = False
             for i, (k, v) in enumerate(chip_config.items()):
                 cnt = cols[i].number_input(f"${v}", value=data['chip_counts'][k], key=f"c_{name}_{k}")
-                data['chip_counts'][k] = cnt
-                stack += cnt * v
+                if cnt != data['chip_counts'][k]:
+                    data['chip_counts'][k] = cnt
+                    changed_chips = True
+            
+            if changed_chips:
+                # We don't auto-save on every chip click to avoid spamming API, 
+                # but maybe should? Let's rely on Manual Save or major events for now.
+                # Or maybe save if they close the expander? Hard to detect.
+                # Let's add a "Update Stack" button or just trust the next event saves it.
+                # Actually, Streamlit reruns on every change, so we COULD save.
+                # But rate limits... Let's save on Sidebar "Force Save" or major events.
+                pass
+
+            stack = sum(data['chip_counts'][k] * chip_config[k] for k in chip_config)
             c_chips.metric("Stack", f"${stack:,.0f}")
             
             # Cash Out
@@ -539,6 +653,7 @@ else:
                     data['final_payout'] = proj_cash_payout
                     data['final_fee'] = fee
                     data['status'] = 'out'
+                    save_snapshot()
                     st.rerun()
 
     # Paused Players
@@ -550,6 +665,7 @@ else:
                 pc1.info(f"**{name}** (Buy-in: ${data['cash_in']+data['credit_in']:,}) - Paused")
                 if pc2.button(t["return_seat"], key=f"ret_{name}"):
                     data['status'] = 'active'
+                    save_snapshot()
                     st.rerun()
 
     # 3. Summary & Financials
@@ -571,6 +687,7 @@ else:
                      "Item": exp_item,
                      "Amount": exp_amt
                  })
+                 save_snapshot()
                  st.rerun()
         if st.session_state['expenses_log']:
             st.dataframe(pd.DataFrame(st.session_state['expenses_log']), use_container_width=True)
@@ -598,6 +715,7 @@ else:
                             "Event": "Manual Rake", 
                             "Amount": new_rake
                         })
+                        save_snapshot()
                         st.rerun()
                 st.metric(t["total_rake"], f"${st.session_state['income_rake']:,.0f}")
                 st.caption(t["log_rake"])
@@ -623,6 +741,7 @@ else:
                         st.session_state['insurance_log'].append({
                             "Time": datetime.now().strftime("%H:%M"), "Action": "Win (沒中)", "Details": f"Bet ${ins_bet}", "Change": f"+${ins_bet}"
                         })
+                        save_snapshot()
                         st.rerun()
                 if b_loss.button(t["btn_loss"], use_container_width=True):
                     if ins_bet > 0:
@@ -630,6 +749,7 @@ else:
                         st.session_state['insurance_log'].append({
                             "Time": datetime.now().strftime("%H:%M"), "Action": "Loss (中了)", "Details": f"Pay limit", "Change": f"-${payout}"
                         })
+                        save_snapshot()
                         st.rerun()
 
             with st.popover(t["btn_add_ins"]):
@@ -637,6 +757,7 @@ else:
                 if st.button("Add Manual"):
                     st.session_state['income_insurance'] += manual_ins
                     st.session_state['insurance_log'].append({"Time": datetime.now().strftime("%H:%M"), "Action": "Manual", "Details": "-", "Change": f"+${manual_ins}"})
+                    save_snapshot()
                     st.rerun()
             st.metric(t["total_ins"], f"${st.session_state['income_insurance']:,.0f}")
             st.caption(t["log_ins"])
@@ -670,7 +791,9 @@ else:
         final_notes = f"{notes} | Exp: {exp_details}"
         total_buyin = sum(p['cash_in']+p['credit_in'] for p in st.session_state['players'].values())
         total_payout = sum(p['final_payout'] for p in st.session_state['players'].values() if p['status']=='out')
+        
         save_session_to_cloud(st.session_state['game_mode'], total_buyin, total_payout, gross_income, total_exp, net_profit, my_share, final_notes)
+        wipe_snapshot() # Clean up persistence after official save
         st.success(t["saved"])
         st.balloons()
         
@@ -685,5 +808,6 @@ else:
         st.dataframe(pd.DataFrame(out_players), use_container_width=True)
 
     if st.button(t["reset"]):
+        wipe_snapshot() # Wipe cloud
         st.session_state.clear()
         st.rerun()
