@@ -8,52 +8,37 @@ from streamlit_gsheets import GSheetsConnection
 # --- Configuration & Setup ---
 st.set_page_config(page_title="Poker Host CRM v4.0", page_icon="♠️", layout="wide")
 
-# --- Cloud Database Integration (Google Sheets) ---
-def get_db_connection():
-    return st.connection("gsheets", type=GSheetsConnection)
+# --- Google Sheets Connection ---
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 def get_analytics_data():
-    conn = get_db_connection()
     try:
-        # Read with short TTL to get fresh data
-        df = conn.read(ttl=5)
-        # Ensure columns exist if empty
-        expected_cols = ["timestamp", "game_mode", "total_buyin", "total_cash_out", "gross_house_profit", "expenses", "net_profit", "my_share", "notes"]
-        if df.empty or set(expected_cols) - set(df.columns):
-            return pd.DataFrame(columns=expected_cols)
+        df = conn.read(ttl="10s") # 每10秒刷新一次數據
         return df
     except Exception as e:
-        # If sheet is empty or error, return empty DF structure
-        return pd.DataFrame(columns=["timestamp", "game_mode", "total_buyin", "total_cash_out", "gross_house_profit", "expenses", "net_profit", "my_share", "notes"])
+        return pd.DataFrame()
 
-def save_session_to_db(mode, buyin, cashout, gross, expenses, net, share, notes):
-    conn = get_db_connection()
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def save_session_to_cloud(mode, buyin, cashout, gross, expenses, net, share, notes):
+    # 1. 讀取現有數據
+    existing_data = get_analytics_data()
     
-    new_data = pd.DataFrame([{
-        "timestamp": ts,
-        "game_mode": mode,
-        "total_buyin": buyin,
-        "total_cash_out": cashout,
-        "gross_house_profit": gross,
-        "expenses": expenses,
-        "net_profit": net,
-        "my_share": share,
-        "notes": notes
+    # 2. 準備新行
+    new_row = pd.DataFrame([{
+        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Mode": mode,
+        "Total_Buyin": buyin,
+        "Total_Cashout": cashout,
+        "Gross_Profit": gross,
+        "Expenses": expenses,
+        "Net_Profit": net,
+        "My_Share": share,
+        "Notes": notes
     }])
     
-    try:
-        df_existing = conn.read(ttl=0)
-        # If headers missing, just use new_data
-        if df_existing.empty:
-             df_updated = new_data
-        else:
-             df_updated = pd.concat([df_existing, new_data], ignore_index=True)
-             
-        conn.update(data=df_updated)
-    except Exception:
-        # If read fails (e.g. empty sheet), try writing directly
-        conn.update(data=new_data)
+    # 3. 合併並更新
+    updated_df = pd.concat([existing_data, new_row], ignore_index=True)
+    conn.update(data=updated_df)
+    st.cache_data.clear() # 清除緩存以確保下次讀取最新數據
 
 # --- Session State ---
 if 'players' not in st.session_state:
@@ -286,9 +271,9 @@ if page == "Analytics":
     df = get_analytics_data()
     
     if not df.empty:
-        total_profit = df['my_share'].sum()
+        total_profit = df['My_Share'].sum()
         total_sessions = len(df)
-        avg_profit = df['my_share'].mean()
+        avg_profit = df['My_Share'].mean()
         
         k1, k2, k3 = st.columns(3)
         k1.metric(t["kpi_lifetime"], f"${total_profit:,.0f}")
@@ -299,14 +284,14 @@ if page == "Analytics":
         c1, c2 = st.columns([2, 1])
         with c1:
             st.subheader("💰 Growth Curve")
-            df['cumulative_profit'] = df['my_share'].cumsum()
-            fig = px.line(df, x='timestamp', y='cumulative_profit', markers=True)
+            df['cumulative_profit'] = df['My_Share'].cumsum()
+            fig = px.line(df, x='Timestamp', y='cumulative_profit', markers=True)
             st.plotly_chart(fig, use_container_width=True)
         with c2:
             st.subheader("🎲 Game Modes")
-            fig2 = px.pie(df, names='game_mode', values='my_share', hole=0.4)
+            fig2 = px.pie(df, names='Mode', values='My_Share', hole=0.4)
             st.plotly_chart(fig2, use_container_width=True)
-        st.dataframe(df.style.format("${:,.0f}", subset=["total_buyin", "net_profit", "my_share"]), use_container_width=True)
+        st.dataframe(df.style.format("${:,.0f}", subset=["Total_Buyin", "Net_Profit", "My_Share"]), use_container_width=True)
     else:
         st.info("No saved sessions in cloud.")
 
@@ -617,7 +602,7 @@ else:
         final_notes = f"{notes} | Exp: {exp_details}"
         total_buyin = sum(p['cash_in']+p['credit_in'] for p in st.session_state['players'].values())
         total_payout = sum(p['final_payout'] for p in st.session_state['players'].values() if p['status']=='out')
-        save_session_to_db(st.session_state['game_mode'], total_buyin, total_payout, gross_income, total_exp, net_profit, my_share, final_notes)
+        save_session_to_cloud(st.session_state['game_mode'], total_buyin, total_payout, gross_income, total_exp, net_profit, my_share, final_notes)
         st.success(t["saved"])
         st.balloons()
         
