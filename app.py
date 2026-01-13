@@ -19,11 +19,7 @@ KEYS_TO_PERSIST = [
     'income_rake', 'income_insurance', 'game_mode', 'fee_cash_collected', 'start_time'
 ]
 
-# --- 2. Initialize Cookie Manager ---
-cookie_manager = stx.CookieManager(key="cookie_manager_main")
 
-if 'authenticated' not in st.session_state:
-    st.session_state['authenticated'] = False
 
 # --- FLIGHT RECORDER FUNCTIONS (Persistence) ---
 def sync_state_to_cloud():
@@ -137,45 +133,76 @@ def save_session_to_cloud(mode, buyin, cashout, gross, expenses, net, share, not
     conn.update(data=updated_df)
     st.cache_data.clear()
 
-# --- V5.0 SaaS AUTHENTICATION ---
+# --- 1. Initialize Cookie Manager ---
+cookie_manager = stx.CookieManager(key="auth_cookie_manager")
+
+# --- 2. Session State Initialization ---
+if 'authenticated' not in st.session_state:
+    st.session_state['authenticated'] = False
+if 'host_id' not in st.session_state:
+    st.session_state['host_id'] = None
+if 'just_logged_out' not in st.session_state:
+    st.session_state['just_logged_out'] = False
+
+# --- 3. Load Secrets ---
 try:
     HOSTS = st.secrets["hosts"]
 except Exception as e:
-    st.error("Missing `.streamlit/secrets.toml` with [hosts] section.")
+    st.error("Missing secrets.toml")
     st.stop()
 
+# --- 4. Auto-Login Logic (The Guarded Gate) ---
+# Only attempt auto-login if:
+# A. We are NOT authenticated
+# B. We did NOT just log out (The Fix)
+cookie_token = None
+try:
+    cookie_token = cookie_manager.get("host_token")
+except:
+    pass
 
-# --- 3. Auto-Login Logic ---
-cookie_token = cookie_manager.get("host_token")
-
-if not st.session_state.get('authenticated'):
-    if cookie_token and not st.session_state.get('just_logged_out'):
+if not st.session_state['authenticated'] and not st.session_state['just_logged_out']:
+    if cookie_token:
+        # Check if cookie matches a valid user
         found_user = None
         for uid, upw in HOSTS.items():
-            if cookie_token == uid: 
+            if cookie_token == uid: # In prod, use a hash, but this works for now
                 found_user = uid
                 break
         
         if found_user:
             st.session_state['authenticated'] = True
             st.session_state['host_id'] = found_user
-            if restore_state_from_cloud():
-                st.toast(f"⚡ Auto-logged in as {found_user} (Restored)", icon="🔄")
-            else:
-                st.toast(f"⚡ Auto-logged in as {found_user}")
+            # We do NOT rerun here to avoid weird loops, just let the app flow
+            st.toast(f"⚡ Auto-logged in as {found_user}")
             time.sleep(0.5)
-            st.rerun()
 
-    if st.session_state.get('just_logged_out'):
-        st.session_state['just_logged_out'] = False
+# --- 5. Logout Logic (In Sidebar) ---
+if st.session_state['authenticated']:
+    st.sidebar.divider()
+    st.sidebar.caption(f"User: {st.session_state['host_id']}")
+    if st.sidebar.button("🚪 Logout", type="primary"):
+        # A. Delete Cookie
+        try:
+            cookie_manager.delete("host_token")
+        except:
+            pass
+        
+        # B. Clear Session
+        st.session_state['authenticated'] = False
+        st.session_state['host_id'] = None
+        
+        # C. ACTIVATE THE LOCK (Crucial)
+        st.session_state['just_logged_out'] = True
+        
+        # D. Rerun to show login page
+        st.rerun()
 
-# --- 4. Login Page Logic ---
-if not st.session_state.get('authenticated'):
+# --- 6. Manual Login Page ---
+if not st.session_state['authenticated']:
     c1, c2, c3 = st.columns([1,2,1])
     with c2:
         st.title("🔒 Poker CRM Login")
-        st.info("Please log in to access your dashboard.")
-        
         uid = st.text_input("Host ID")
         upw = st.text_input("Password", type="password")
         remember = st.checkbox("Remember Me / 記住我")
@@ -184,18 +211,27 @@ if not st.session_state.get('authenticated'):
             if uid in HOSTS and HOSTS[uid] == upw:
                 st.session_state['authenticated'] = True
                 st.session_state['host_id'] = uid
+                st.session_state['just_logged_out'] = False # Reset lock
                 
                 if remember:
-                    cookie_manager.set("host_token", uid, expires_at=datetime.now() + pd.Timedelta(days=7))
+                    cookie_manager.set("host_token", uid, key="set_cookie", expires_at=datetime.now() + pd.Timedelta(days=7))
+                else:
+                    # If they didn't check remember, ensure no old cookie remains
+                    try:
+                        cookie_manager.delete("host_token")
+                    except:
+                        pass
                 
+                # Restore Data
                 if restore_state_from_cloud():
                      st.toast("Session Restored!", icon="🔄")
                 
                 time.sleep(0.5)
                 st.rerun()
             else:
-                st.error("Invalid credentials")
-    st.stop() 
+                st.error("Invalid ID or Password")
+    
+    st.stop() # Stop execution here if not logged in 
 
 # --- SESSION STATE DEFAULTS ---
 # Initialize defaults only if keys don't exist (i.e. not restored)
@@ -372,22 +408,7 @@ def get_chip_config():
 
 # --- Sidebar ---
 st.sidebar.header("Settings") 
-if st.session_state.get('authenticated'):
-    st.sidebar.caption(f"Logged in as: `{st.session_state['host_id']}`")
-    if st.sidebar.button("Logout", type="primary"):
-        # A. Delete Cookie
-        try:
-            cookie_manager.delete("host_token")
-        except:
-            pass # Ignore if cookie missing
-        
-        # B. Clear Session
-        st.session_state['authenticated'] = False
-        st.session_state['host_id'] = None
-        # C. Set Anti-Loop Flag
-        st.session_state['just_logged_out'] = True 
-        # D. Rerun
-        st.rerun()
+
 
     # Manual Force Save
     if st.sidebar.button("💾 Force Flight Recorder"):
