@@ -13,9 +13,15 @@ st.set_page_config(page_title="Poker Host CRM v5.5", page_icon="♠️", layout=
 # --- Google Sheets Connection ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+# --- 1. Initialize Cookie Manager ---
+cookie_manager = stx.CookieManager(key="cookie_manager")
+
+if 'authenticated' not in st.session_state:
+    st.session_state['authenticated'] = False
+
 # --- FLIGHT RECORDER FUNCTIONS (Persistence) ---
-def save_snapshot():
-    """Saves current session state to 'state' worksheet"""
+def sync_state_to_cloud():
+    """Saves current session state to 'active_state' worksheet"""
     if not st.session_state.get('authenticated'): return
 
     # 1. Gather State
@@ -41,34 +47,34 @@ def save_snapshot():
     try:
         # 2. Read Existing
         try:
-            df_state = conn.read(worksheet="state", ttl=0)
+            df_state = conn.read(worksheet="active_state", ttl=0)
         except:
-            df_state = pd.DataFrame(columns=["Host_ID", "Updated", "State_JSON"])
+            df_state = pd.DataFrame(columns=["Host_ID", "Last_Update", "State_JSON"])
             
         # 3. Upsert
-        new_row = {"Host_ID": host_id, "Updated": now_str, "State_JSON": json_str}
+        new_row = {"Host_ID": host_id, "Last_Update": now_str, "State_JSON": json_str}
         
         if not df_state.empty and "Host_ID" in df_state.columns:
             if host_id in df_state["Host_ID"].values:
-                df_state.loc[df_state["Host_ID"] == host_id, ["Updated", "State_JSON"]] = [now_str, json_str]
+                df_state.loc[df_state["Host_ID"] == host_id, ["Last_Update", "State_JSON"]] = [now_str, json_str]
             else:
                 df_state = pd.concat([df_state, pd.DataFrame([new_row])], ignore_index=True)
         else:
             df_state = pd.DataFrame([new_row])
             
-        # 4. Push (Upsert logic simulation via full update)
-        conn.update(worksheet="state", data=df_state)
+        # 4. Push
+        conn.update(worksheet="active_state", data=df_state)
     except Exception as e:
-        print(f"Snapshot failed: {e}")
+        print(f"Sync failed: {e}")
 
-def restore_snapshot():
-    """Restores session state from 'state' worksheet if exists"""
+def restore_state_from_cloud():
+    """Restores session state from 'active_state' worksheet if exists"""
     try:
         host_id = st.session_state.get('host_id')
         if not host_id: return False
 
         try:
-            df_state = conn.read(worksheet="state", ttl=0)
+            df_state = conn.read(worksheet="active_state", ttl=0)
         except:
             return False # Sheet doesn't exist
         
@@ -92,6 +98,7 @@ def restore_snapshot():
                 st.session_state['start_time'] = payload.get('start_time', time.time())
                 st.session_state['fee_cash_collected'] = payload.get('fee_cash_collected', 0.0)
                 
+                st.toast("🔄 Game State Restored from Cloud", icon="☁️")
                 return True
     except Exception as e:
         pass
@@ -101,11 +108,11 @@ def wipe_snapshot():
     """Clears persistence for current host"""
     try:
         host_id = st.session_state.get('host_id')
-        df_state = conn.read(worksheet="state", ttl=0)
+        df_state = conn.read(worksheet="active_state", ttl=0)
         if not df_state.empty and "Host_ID" in df_state.columns:
             # Drop row
             df_state = df_state[df_state["Host_ID"] != host_id]
-            conn.update(worksheet="state", data=df_state)
+            conn.update(worksheet="active_state", data=df_state)
     except:
         pass
 
@@ -147,33 +154,41 @@ except Exception as e:
     st.error("Missing `.streamlit/secrets.toml` with [hosts] section.")
     st.stop()
 
-# Cookie Manager
-# @st.cache_resource (Removed to fix CachedWidgetWarning)
-def get_manager():
-    return stx.CookieManager()
-
-cookie_manager = get_manager()
+# --- 1. Initialize Cookie Manager ---
+cookie_manager = stx.CookieManager(key="cookie_manager")
 
 if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
 
-# Auto-Login Check
-if not st.session_state['authenticated']:
-    # Avoid reading cookie on every script run if already processing login? 
-    # Actually component handles this internally
-    auth_token = cookie_manager.get(cookie="poker_crm_token")
-    if auth_token and auth_token in HOSTS:
-        st.session_state['authenticated'] = True
-        st.session_state['host_id'] = auth_token
-        if restore_snapshot():
-            st.toast(f"Welcome back, {auth_token}! Session restored.", icon="🔄")
-        else:
-            st.toast(f"Welcome back, {auth_token}!", icon="👋")
+# --- 3. Auto-Login Logic ---
+cookie_token = cookie_manager.get("host_token")
 
-if not st.session_state['authenticated']:
+if not st.session_state.get('authenticated'):
+    if cookie_token and not st.session_state.get('just_logged_out'):
+        found_user = None
+        for uid, upw in HOSTS.items():
+            if cookie_token == uid: 
+                found_user = uid
+                break
+        
+        if found_user:
+            st.session_state['authenticated'] = True
+            st.session_state['host_id'] = found_user
+            if restore_state_from_cloud():
+                st.toast(f"⚡ Auto-logged in as {found_user} (Restored)", icon="🔄")
+            else:
+                st.toast(f"⚡ Auto-logged in as {found_user}")
+            time.sleep(0.5)
+            st.rerun()
+
+    if st.session_state.get('just_logged_out'):
+        st.session_state['just_logged_out'] = False
+
+# --- 4. Login Page Logic ---
+if not st.session_state.get('authenticated'):
     c1, c2, c3 = st.columns([1,2,1])
     with c2:
-        st.title("🔒 Poker CRM Partner Portal")
+        st.title("🔒 Poker CRM Login")
         st.info("Please log in to access your dashboard.")
         
         uid = st.text_input("Host ID")
@@ -186,12 +201,12 @@ if not st.session_state['authenticated']:
                 st.session_state['host_id'] = uid
                 
                 if remember:
-                    cookie_manager.set("poker_crm_token", uid, expires_at=datetime.now() + pd.Timedelta(days=30))
+                    cookie_manager.set("host_token", uid, expires_at=datetime.now() + pd.Timedelta(days=7))
                 
-                if restore_snapshot():
+                if restore_state_from_cloud():
                      st.toast("Session Restored!", icon="🔄")
                 
-                time.sleep(1)
+                time.sleep(0.5)
                 st.rerun()
             else:
                 st.error("Invalid credentials")
@@ -224,7 +239,7 @@ def log_event(event, amount, type_):
         "Amount": f"${amount:,.0f}",
         "Type": type_
     })
-    save_snapshot() # Auto-Save on Log
+    sync_state_to_cloud() # Auto-Save on Log
 
 # --- Translations ---
 translations = {
@@ -375,13 +390,19 @@ st.sidebar.header("Settings")
 if st.session_state.get('authenticated'):
     st.sidebar.caption(f"Logged in as: `{st.session_state['host_id']}`")
     if st.sidebar.button("Logout", type="primary"):
+        # A. Delete Cookie
+        cookie_manager.delete("host_token")
+        # B. Clear Session
         st.session_state['authenticated'] = False
-        cookie_manager.delete("poker_crm_token")
+        st.session_state['host_id'] = None
+        # C. Set Anti-Loop Flag
+        st.session_state['just_logged_out'] = True 
+        # D. Rerun
         st.rerun()
 
     # Manual Force Save
     if st.sidebar.button("💾 Force Flight Recorder"):
-        save_snapshot()
+        sync_state_to_cloud()
         st.toast("State Saved Manually")
 
 lang = st.sidebar.radio("Language / 語言", ["English", "繁體中文"], horizontal=True, label_visibility="collapsed")
@@ -422,7 +443,7 @@ if st.sidebar.checkbox("🔧 Admin Mode"):
                         "final_payout": p_payout, 
                         "final_fee": p_fee
                     }
-                save_snapshot() # Auto-Save on Import
+                sync_state_to_cloud() # Auto-Save on Import
                 st.sidebar.success(f"Imported {len(df_import)} players!")
                 time.sleep(1) 
                 st.rerun()
@@ -474,7 +495,7 @@ else:
     new_mode = "Time Charge" if game_mode_sel == t["mode_time"] else "Rake Game"
     if st.session_state['game_mode'] != new_mode:
         st.session_state['game_mode'] = new_mode
-        save_snapshot() # Save on mode change
+        sync_state_to_cloud() # Save on mode change
     
     # Chip Config
     st.sidebar.header(t["sidebar_header"])
@@ -538,7 +559,7 @@ else:
                     "chip_counts": {k:0 for k in chip_config}, 
                     "status": "active", "final_stack": 0, "final_payout": 0, "final_fee": 0
                 }
-                save_snapshot()
+                sync_state_to_cloud()
                 st.rerun()
 
     # 2. Active Players
@@ -561,7 +582,7 @@ else:
                     if st.button("Confirm", key=f"btn_rb_{name}"):
                         data['cash_in'] += amt 
                         log_event(f"{name} Rebuy", amt, "Cash")
-                        # save_snapshot called in log_event
+                        # sync_state_to_cloud called in log_event
                         st.rerun()
                 
                 # Repay (V3.2)
@@ -580,7 +601,7 @@ else:
                 # Sit Out
                 if st.button(t["sit_out"], key=f"so_{name}"):
                     data['status'] = 'paused'
-                    save_snapshot()
+                    sync_state_to_cloud()
                     st.rerun()
 
             # Chips
@@ -653,7 +674,7 @@ else:
                     data['final_payout'] = proj_cash_payout
                     data['final_fee'] = fee
                     data['status'] = 'out'
-                    save_snapshot()
+                    sync_state_to_cloud()
                     st.rerun()
 
     # Paused Players
@@ -665,7 +686,7 @@ else:
                 pc1.info(f"**{name}** (Buy-in: ${data['cash_in']+data['credit_in']:,}) - Paused")
                 if pc2.button(t["return_seat"], key=f"ret_{name}"):
                     data['status'] = 'active'
-                    save_snapshot()
+                    sync_state_to_cloud()
                     st.rerun()
 
     # 3. Summary & Financials
@@ -687,7 +708,7 @@ else:
                      "Item": exp_item,
                      "Amount": exp_amt
                  })
-                 save_snapshot()
+                 sync_state_to_cloud()
                  st.rerun()
         if st.session_state['expenses_log']:
             st.dataframe(pd.DataFrame(st.session_state['expenses_log']), use_container_width=True)
@@ -715,7 +736,7 @@ else:
                             "Event": "Manual Rake", 
                             "Amount": new_rake
                         })
-                        save_snapshot()
+                        sync_state_to_cloud()
                         st.rerun()
                 st.metric(t["total_rake"], f"${st.session_state['income_rake']:,.0f}")
                 st.caption(t["log_rake"])
@@ -741,7 +762,7 @@ else:
                         st.session_state['insurance_log'].append({
                             "Time": datetime.now().strftime("%H:%M"), "Action": "Win (沒中)", "Details": f"Bet ${ins_bet}", "Change": f"+${ins_bet}"
                         })
-                        save_snapshot()
+                        sync_state_to_cloud()
                         st.rerun()
                 if b_loss.button(t["btn_loss"], use_container_width=True):
                     if ins_bet > 0:
@@ -749,7 +770,7 @@ else:
                         st.session_state['insurance_log'].append({
                             "Time": datetime.now().strftime("%H:%M"), "Action": "Loss (中了)", "Details": f"Pay limit", "Change": f"-${payout}"
                         })
-                        save_snapshot()
+                        sync_state_to_cloud()
                         st.rerun()
 
             with st.popover(t["btn_add_ins"]):
@@ -757,7 +778,7 @@ else:
                 if st.button("Add Manual"):
                     st.session_state['income_insurance'] += manual_ins
                     st.session_state['insurance_log'].append({"Time": datetime.now().strftime("%H:%M"), "Action": "Manual", "Details": "-", "Change": f"+${manual_ins}"})
-                    save_snapshot()
+                    sync_state_to_cloud()
                     st.rerun()
             st.metric(t["total_ins"], f"${st.session_state['income_insurance']:,.0f}")
             st.caption(t["log_ins"])
