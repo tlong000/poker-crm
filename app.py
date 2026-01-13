@@ -13,7 +13,13 @@ st.set_page_config(page_title="Poker Host CRM v5.5", page_icon="♠️", layout=
 # --- Google Sheets Connection ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- 1. Initialize Cookie Manager ---
+# --- 1. Constants & Setup ---
+KEYS_TO_PERSIST = [
+    'players', 'log', 'expenses_log', 'rake_log', 'insurance_log', 
+    'income_rake', 'income_insurance', 'game_mode', 'fee_cash_collected', 'start_time'
+]
+
+# --- 2. Initialize Cookie Manager ---
 cookie_manager = stx.CookieManager(key="cookie_manager_main")
 
 if 'authenticated' not in st.session_state:
@@ -24,19 +30,8 @@ def sync_state_to_cloud():
     """Saves current session state to 'active_state' worksheet"""
     if not st.session_state.get('authenticated'): return
 
-    # 1. Gather State
-    state_payload = {
-        "players": st.session_state.get('players', {}),
-        "log": st.session_state.get('log', []),
-        "expenses": st.session_state.get('expenses_log', []),
-        "rake_log": st.session_state.get('rake_log', []),
-        "insurance_log": st.session_state.get('insurance_log', []),
-        "income_rake": st.session_state.get('income_rake', 0.0),
-        "income_insurance": st.session_state.get('income_insurance', 0.0),
-        "game_mode": st.session_state.get('game_mode', "Time Charge"),
-        "start_time": st.session_state.get('start_time', time.time()),
-        "fee_cash_collected": st.session_state.get('fee_cash_collected', 0.0)
-    }
+    # 1. Gather State (Dynamic)
+    state_payload = {k: st.session_state.get(k) for k in KEYS_TO_PERSIST}
     
     json_str = json.dumps(state_payload)
     host_id = st.session_state.get('host_id')
@@ -44,14 +39,15 @@ def sync_state_to_cloud():
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
+    # 2. Safe Sync Wrapper
     try:
-        # 2. Read Existing
+        # Read Existing
         try:
             df_state = conn.read(worksheet="active_state", ttl=0)
         except:
             df_state = pd.DataFrame(columns=["Host_ID", "Last_Update", "State_JSON"])
             
-        # 3. Upsert
+        # Upsert
         new_row = {"Host_ID": host_id, "Last_Update": now_str, "State_JSON": json_str}
         
         if not df_state.empty and "Host_ID" in df_state.columns:
@@ -62,10 +58,11 @@ def sync_state_to_cloud():
         else:
             df_state = pd.DataFrame([new_row])
             
-        # 4. Push
+        # Push
         conn.update(worksheet="active_state", data=df_state)
     except Exception as e:
-        print(f"Sync failed: {e}")
+        # V6.0 Safe Sync: Log error but don't crash app
+        print(f"Sync failed (Non-critical): {e}")
 
 def restore_state_from_cloud():
     """Restores session state from 'active_state' worksheet if exists"""
@@ -86,22 +83,15 @@ def restore_state_from_cloud():
 
                 payload = json.loads(json_str)
                 
-                # Restore keys
-                st.session_state['players'] = payload.get('players', {})
-                st.session_state['log'] = payload.get('log', [])
-                st.session_state['expenses_log'] = payload.get('expenses', [])
-                st.session_state['rake_log'] = payload.get('rake_log', [])
-                st.session_state['insurance_log'] = payload.get('insurance_log', [])
-                st.session_state['income_rake'] = payload.get('income_rake', 0.0)
-                st.session_state['income_insurance'] = payload.get('income_insurance', 0.0)
-                st.session_state['game_mode'] = payload.get('game_mode', "Time Charge")
-                st.session_state['start_time'] = payload.get('start_time', time.time())
-                st.session_state['fee_cash_collected'] = payload.get('fee_cash_collected', 0.0)
+                # Restore Keys (Dynamic)
+                for k in KEYS_TO_PERSIST:
+                    if k in payload:
+                        st.session_state[k] = payload[k]
                 
                 st.toast("🔄 Game State Restored from Cloud", icon="☁️")
                 return True
     except Exception as e:
-        pass
+        print(f"Restore failed: {e}")
     return False
 
 def wipe_snapshot():
@@ -505,42 +495,41 @@ else:
         
     st.title(t["app_title"])
 
-    # --- V3.2 INTEGRITY CHECK (AUDIT SYSTEM) ---
+    # --- V6.0 HIGH-LEVEL METRICS (CALCULATION) ---
     total_inflow = sum(p['cash_in'] + p['credit_in'] for p in st.session_state['players'].values())
     
-    # 1. Chips currently on table
+    # Audit Logic
     chips_on_table = 0
     for p in st.session_state['players'].values():
         if p['status'] in ['active', 'paused']:
             s = sum(p['chip_counts'][k] * chip_config[k] for k in chip_config)
             chips_on_table += s
             
-    # 2. Chips taken by players (Final Stacks)
     total_final_stacks = sum(p.get('final_stack', 0) for p in st.session_state['players'].values() if p['status'] == 'out')
-    
-    # 3. Fees handling
     total_fees_in_rake = sum(p.get('final_fee', 0) for p in st.session_state['players'].values() if p['status']=='out' and p.get('final_fee', 0) > 0)
     
-    # 4. Chips removed by House
     pot_rake = st.session_state['income_rake'] - total_fees_in_rake
     gross_insurance = st.session_state['income_insurance']
     
-    # 5. Expenses REMOVED (V3.2)
-    
     total_outflow = chips_on_table + total_final_stacks + pot_rake + gross_insurance
-    
     discrepancy = total_inflow - total_outflow
-    
-    # Audit Bar UI
-    audit_msg = f"Chips In: ${total_inflow:,.0f} | Chips Tracked: ${total_outflow:,.0f} | Diff: ${-discrepancy:,.0f}"
+
+    # Dashboard Metrics
+    total_exp = sum(x['Amount'] for x in st.session_state['expenses_log'])
+    net_profit_house = (st.session_state['income_rake'] + st.session_state['income_insurance']) - total_exp
+
+    # --- V6.0 DASHBOARD UI ---
+    m1, m2, m3 = st.columns(3)
+    m1.metric("🎲 Active Chips (Pot)", f"${chips_on_table:,.0f}")
+    m2.metric("💰 House Profit", f"${net_profit_house:,.0f}", delta_color="normal")
     
     if discrepancy == 0:
-        st.success(f"**{t['audit_ok']}**  \n`{audit_msg}`")
+        m3.metric("✅ Audit Status", "OK", delta="Balanced", delta_color="normal")
     elif discrepancy > 0:
-        st.error(f"**{t['audit_short']}: -${discrepancy:,.0f}**  \n`{audit_msg}`")
+        m3.metric("🔴 Audit Status", f"SHORT: -${discrepancy:,.0f}", delta="Missing", delta_color="inverse")
     else:
-        st.warning(f"**{t['audit_surplus']}: +${abs(discrepancy):,.0f}**  \n`{audit_msg}`")
-        
+        m3.metric("🟡 Audit Status", f"SURPLUS: +${abs(discrepancy):,.0f}", delta="Extra", delta_color="off")
+
     st.divider()
 
     # --- APP BODY ---
