@@ -386,7 +386,11 @@ if st.session_state.get('authenticated'):
     st.sidebar.caption(f"Logged in as: `{st.session_state['host_id']}`")
     if st.sidebar.button("Logout", type="primary"):
         # A. Delete Cookie
-        cookie_manager.delete("host_token")
+        try:
+            cookie_manager.delete("host_token")
+        except:
+            pass # Ignore if cookie missing
+        
         # B. Clear Session
         st.session_state['authenticated'] = False
         st.session_state['host_id'] = None
