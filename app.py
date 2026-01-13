@@ -5,8 +5,10 @@ from datetime import datetime
 import plotly.express as px
 from streamlit_gsheets import GSheetsConnection
 
+import extra_streamlit_components as stx
+
 # --- Configuration & Setup ---
-st.set_page_config(page_title="Poker Host CRM v5.0 SaaS", page_icon="♠️", layout="wide")
+st.set_page_config(page_title="Poker Host CRM v5.2", page_icon="♠️", layout="wide")
 
 # --- V5.0 SaaS AUTHENTICATION ---
 try:
@@ -15,9 +17,25 @@ except Exception as e:
     st.error("Missing `.streamlit/secrets.toml` with [hosts] section.")
     st.stop()
 
+# Cookie Manager for Auto-Login
+@st.cache_resource(experimental_allow_widgets=True)
+def get_manager():
+    return stx.CookieManager()
+
+cookie_manager = get_manager()
+
+# Check for exisiting session or cookie
 if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
 
+# Auto-Login Logic
+if not st.session_state['authenticated']:
+    auth_token = cookie_manager.get(cookie="poker_crm_token")
+    if auth_token and auth_token in HOSTS:
+        st.session_state['authenticated'] = True
+        st.session_state['host_id'] = auth_token
+        st.toast(f"Welcome back, {auth_token}!", icon="🍪")
+        
 if not st.session_state['authenticated']:
     c1, c2, c3 = st.columns([1,2,1])
     with c2:
@@ -26,11 +44,16 @@ if not st.session_state['authenticated']:
         
         uid = st.text_input("Host ID")
         upw = st.text_input("Password", type="password")
+        remember = st.checkbox("Remember Me / 記住我")
         
         if st.button("Log In", type="primary", use_container_width=True):
             if uid in HOSTS and HOSTS[uid] == upw:
                 st.session_state['authenticated'] = True
                 st.session_state['host_id'] = uid
+                
+                if remember:
+                    cookie_manager.set("poker_crm_token", uid, expires_at=datetime.now() + pd.Timedelta(days=30))
+                
                 st.toast(f"Welcome back, {uid}!", icon="👋")
                 time.sleep(1)
                 st.rerun()
@@ -263,6 +286,7 @@ st.sidebar.header("Settings")
 st.sidebar.caption(f"Logged in as: `{st.session_state['host_id']}`")
 if st.sidebar.button("Logout", type="primary"):
     st.session_state['authenticated'] = False
+    cookie_manager.delete("poker_crm_token")
     st.rerun()
 
 lang = st.sidebar.radio("Language / 語言", ["English", "繁體中文"], horizontal=True, label_visibility="collapsed")
