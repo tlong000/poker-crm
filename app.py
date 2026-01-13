@@ -2,55 +2,58 @@ import streamlit as st
 import pandas as pd
 import time
 from datetime import datetime
-import sqlite3
 import plotly.express as px
+from streamlit_gsheets import GSheetsConnection
 
 # --- Configuration & Setup ---
-st.set_page_config(page_title="Poker Host CRM v3.1", page_icon="♠️", layout="wide")
+st.set_page_config(page_title="Poker Host CRM v4.0", page_icon="♠️", layout="wide")
 
-# --- Database Integration ---
-DB_NAME = "poker_crm.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            game_mode TEXT,
-            total_buyin REAL,
-            total_cash_out REAL,
-            gross_house_profit REAL,
-            expenses REAL,
-            net_profit REAL,
-            my_share REAL,
-            notes TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-def save_session_to_db(mode, buyin, cashout, gross, expenses, net, share, notes):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute('''
-        INSERT INTO sessions 
-        (timestamp, game_mode, total_buyin, total_cash_out, gross_house_profit, expenses, net_profit, my_share, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (ts, mode, buyin, cashout, gross, expenses, net, share, notes))
-    conn.commit()
-    conn.close()
+# --- Cloud Database Integration (Google Sheets) ---
+def get_db_connection():
+    return st.connection("gsheets", type=GSheetsConnection)
 
 def get_analytics_data():
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT * FROM sessions", conn)
-    conn.close()
-    return df
+    conn = get_db_connection()
+    try:
+        # Read with short TTL to get fresh data
+        df = conn.read(ttl=5)
+        # Ensure columns exist if empty
+        expected_cols = ["timestamp", "game_mode", "total_buyin", "total_cash_out", "gross_house_profit", "expenses", "net_profit", "my_share", "notes"]
+        if df.empty or set(expected_cols) - set(df.columns):
+            return pd.DataFrame(columns=expected_cols)
+        return df
+    except Exception as e:
+        # If sheet is empty or error, return empty DF structure
+        return pd.DataFrame(columns=["timestamp", "game_mode", "total_buyin", "total_cash_out", "gross_house_profit", "expenses", "net_profit", "my_share", "notes"])
 
-# Initialize DB on load
-init_db()
+def save_session_to_db(mode, buyin, cashout, gross, expenses, net, share, notes):
+    conn = get_db_connection()
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    new_data = pd.DataFrame([{
+        "timestamp": ts,
+        "game_mode": mode,
+        "total_buyin": buyin,
+        "total_cash_out": cashout,
+        "gross_house_profit": gross,
+        "expenses": expenses,
+        "net_profit": net,
+        "my_share": share,
+        "notes": notes
+    }])
+    
+    try:
+        df_existing = conn.read(ttl=0)
+        # If headers missing, just use new_data
+        if df_existing.empty:
+             df_updated = new_data
+        else:
+             df_updated = pd.concat([df_existing, new_data], ignore_index=True)
+             
+        conn.update(data=df_updated)
+    except Exception:
+        # If read fails (e.g. empty sheet), try writing directly
+        conn.update(data=new_data)
 
 # --- Session State ---
 if 'players' not in st.session_state:
@@ -97,7 +100,7 @@ translations = {
         "mode_time": "Time Charge (Venue Fee)",
         "mode_rake": "Rake Game (Profit Share)",
         "sidebar_header": "🔧 Chip Config",
-        "app_title": "🃏 Poker Host CRM v3.1",
+        "app_title": "🃏 Poker Host CRM v4.0",
         "live_header": "🎲 Active Players",
         "paused_header": "🟡 Paused / Sit Out",
         "history_header": "⚫ Cashed Out History",
@@ -109,8 +112,8 @@ translations = {
         "fee_deduct": "Deduct Stack",
         "fee_cash": "Paid Cash",
         "summary": "📊 Session Summary",
-        "save_session": "💾 Save Session to DB",
-        "saved": "Session Saved!",
+        "save_session": "💾 Save Session to Cloud",
+        "saved": "Session Saved to GSheets!",
         "analytics_title": "📈 Profit Analytics",
         "kpi_lifetime": "Lifetime Profit",
         "kpi_sessions": "Total Sessions",
@@ -150,7 +153,9 @@ translations = {
         "player_owes": "🔴 Player Owes",
         "audit_ok": "✅ System Balanced",
         "audit_short": "🔴 SHORTAGE DETECTED",
-        "audit_surplus": "🟡 SURPLUS DETECTED"
+        "audit_surplus": "🟡 SURPLUS DETECTED",
+        "repay": "💰 Repay",
+        "btn_repay": "Confirm Repay"
     },
     "繁體中文": {
         "nav_header": "功能導覽",
@@ -160,7 +165,7 @@ translations = {
         "mode_time": "計時局 (收清潔費)",
         "mode_rake": "抽水局 (股東分潤)",
         "sidebar_header": "🔧 籌碼設定",
-        "app_title": "🃏 撲克局務管理 v3.1",
+        "app_title": "🃏 撲克局務管理 v4.0",
         "live_header": "🎲 在桌玩家",
         "paused_header": "🟡 暫離 / Sit Out",
         "history_header": "⚫ 已離桌記錄",
@@ -172,8 +177,8 @@ translations = {
         "fee_deduct": "籌碼扣除",
         "fee_cash": "另外付現",
         "summary": "📊 結算總表",
-        "save_session": "💾 保存牌局記錄",
-        "saved": "記錄已保存！",
+        "save_session": "💾 保存牌局記錄 (雲端)",
+        "saved": "記錄已上傳 Google Sheets！",
         "analytics_title": "📈 獲利分析報表",
         "kpi_lifetime": "生涯總獲利",
         "kpi_sessions": "總場次",
@@ -213,7 +218,9 @@ translations = {
         "player_owes": "🔴 玩家回補",
         "audit_ok": "✅ 系統平衡 (無帳差)",
         "audit_short": "🔴 警告：帳目短缺 (少籌碼)",
-        "audit_surplus": "🟡 警告：帳目盈餘 (多籌碼)"
+        "audit_surplus": "🟡 警告：帳目盈餘 (多籌碼)",
+        "repay": "💰 還款 (轉現金)",
+        "btn_repay": "確認還款"
     }
 }
 
@@ -253,10 +260,10 @@ if st.sidebar.checkbox("🔧 Admin Mode"):
                 # ExpectedCols: Name, Buy-in, Final Stack, Payout, Fee Paid
                 for index, row in df_import.iterrows():
                     p_name = str(row['Name'])
-                    p_buyin = float(row['Buy-in']) # Assuming all Cash for simplicity or split if needed
+                    p_buyin = float(row['Buy-in']) 
                     p_stack = float(row['Final Stack'])
                     p_payout = float(row['Payout'])
-                    p_fee = float(row.get('Fee Paid', 0)) # Safe get
+                    p_fee = float(row.get('Fee Paid', 0)) 
                     
                     st.session_state['players'][p_name] = {
                         "cash_in": p_buyin, 
@@ -268,7 +275,7 @@ if st.sidebar.checkbox("🔧 Admin Mode"):
                         "final_fee": p_fee
                     }
                 st.sidebar.success(f"Imported {len(df_import)} players!")
-                time.sleep(1) # Visual feedback
+                time.sleep(1) 
                 st.rerun()
             except Exception as e:
                 st.sidebar.error(f"Error: {e}")
@@ -301,7 +308,7 @@ if page == "Analytics":
             st.plotly_chart(fig2, use_container_width=True)
         st.dataframe(df.style.format("${:,.0f}", subset=["total_buyin", "net_profit", "my_share"]), use_container_width=True)
     else:
-        st.info("No saved sessions yet.")
+        st.info("No saved sessions in cloud.")
 
 # --- PAGE: HOME (Active Session) ---
 else:
@@ -327,18 +334,7 @@ else:
         
     st.title(t["app_title"])
 
-    # --- V3.1 INTEGRITY CHECK (AUDIT SYSTEM) ---
-    # Logic: Inflow - Outflow
-    # Inflow = Sum(Cash In + Credit In)
-    # Correct Formula Logic:
-    # Chips Created (Inflow) MUST EQUAL Chips Existing + Chips Destroyed (Outflow)
-    # Outflow = (Active Stacks) + (Paused Stacks) + (Final Stacks of Out Players) + (Money Removed from Table not in Stacks)
-    # Money Removed = (Rake from Pots) + (Insurance Income) + (Expenses/Tips)
-    
-    # Note on Rake: 'income_rake' includes Fees deducted from stacks.
-    # 'Final Stack' ALSO includes Fees (before they were deducted).
-    # To avoid Double Counting, we must use: (Total Rake - Fees Collected).
-    
+    # --- V3.2 INTEGRITY CHECK (AUDIT SYSTEM) ---
     total_inflow = sum(p['cash_in'] + p['credit_in'] for p in st.session_state['players'].values())
     
     # 1. Chips currently on table
@@ -352,33 +348,26 @@ else:
     total_final_stacks = sum(p.get('final_stack', 0) for p in st.session_state['players'].values() if p['status'] == 'out')
     
     # 3. Fees handling
-    # We need to know how much of 'income_rake' came from Fees vs Pot Rake.
     total_fees_in_rake = sum(p.get('final_fee', 0) for p in st.session_state['players'].values() if p['status']=='out' and p.get('final_fee', 0) > 0)
     
-    # 4. Chips removed by House (Pot Rake + Insurance)
-    # We subtract fees from Total Rake because those chips are already counted in 'total_final_stacks'
+    # 4. Chips removed by House
     pot_rake = st.session_state['income_rake'] - total_fees_in_rake
     gross_insurance = st.session_state['income_insurance']
     
-    # 5. Expenses (Tips) - Excluded from Chip Audit in V3.2
-    # Rationale: Expenses are paid out-of-pocket (cash), not from table chips.
-    # So 'Total Outflow' only tracks where CHIPS went.
+    # 5. Expenses REMOVED (V3.2)
     
     total_outflow = chips_on_table + total_final_stacks + pot_rake + gross_insurance
     
     discrepancy = total_inflow - total_outflow
     
     # Audit Bar UI
-    # V3.2: Show detailed breakdown
     audit_msg = f"Chips In: ${total_inflow:,.0f} | Chips Tracked: ${total_outflow:,.0f} | Diff: ${-discrepancy:,.0f}"
     
     if discrepancy == 0:
         st.success(f"**{t['audit_ok']}**  \n`{audit_msg}`")
     elif discrepancy > 0:
-        # Shortage (Inflow > Outflow) - Missing chips
         st.error(f"**{t['audit_short']}: -${discrepancy:,.0f}**  \n`{audit_msg}`")
     else:
-        # Surplus (Outflow > Inflow) - Extra chips
         st.warning(f"**{t['audit_surplus']}: +${abs(discrepancy):,.0f}**  \n`{audit_msg}`")
         
     st.divider()
@@ -409,7 +398,8 @@ else:
         st.info("No active players.")
 
     for name, data in active.items():
-        with st.expander(f"**{name}** (${data['cash_in']+data['credit_in']:,}) -- Active", expanded=True):
+        total_in = data['cash_in'] + data['credit_in']
+        with st.expander(f"**{name}** (${total_in:,}) [Cash: ${data['cash_in']:,} | Credit: ${data['credit_in']:,}]", expanded=True):
             c_chips, c_acts = st.columns([3, 1])
             
             with c_acts:
@@ -417,9 +407,23 @@ else:
                 with st.popover(t["rebuy"]):
                     amt = st.number_input("Amt", step=100, key=f"rb_{name}")
                     if st.button("Confirm", key=f"btn_rb_{name}"):
-                        data['cash_in'] += amt
+                        data['cash_in'] += amt 
                         log_event(f"{name} Rebuy", amt, "Cash")
                         st.rerun()
+                
+                # Repay (V3.2)
+                with st.popover(t["repay"]):
+                    if data['credit_in'] > 0:
+                        rep_amt = st.number_input("Amount", step=100.0, max_value=float(data['credit_in']), key=f"rep_{name}")
+                        if st.button(t['btn_repay'], key=f"btn_rep_{name}"):
+                            if rep_amt > 0:
+                                data['credit_in'] -= rep_amt
+                                data['cash_in'] += rep_amt
+                                log_event(f"{name} Repaid Debt", rep_amt, "Repay")
+                                st.rerun()
+                    else:
+                        st.info("No Debt")
+
                 # Sit Out
                 if st.button(t["sit_out"], key=f"so_{name}"):
                     data['status'] = 'paused'
